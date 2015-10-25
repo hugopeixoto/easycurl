@@ -37,6 +37,18 @@ static Optional<std::string> html_body(const EasyCurl &response) {
   }
 }
 
+static bool is_html_content_type(const std::string &content_type) {
+  static std::string valid[] = {"text/html", "application/xhtml+xml"};
+
+  for (const auto &ct : valid) {
+    if (content_type.compare(0, ct.length(), ct) == 0) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
 int EasyCurl::headerWriter(char *data, size_t size, size_t nmemb,
                            EasyCurl *instance) {
   return instance->instanceHeaderWriter(data, size * nmemb) ? size * nmemb : 0;
@@ -71,35 +83,38 @@ bool EasyCurl::instanceBodyWriter(char *data, size_t bytes) {
   return (this->bufferTotal <= DOWNLOAD_SIZE);
 }
 
-bool EasyCurl::extractContentType() {
-  char *content_type;
+static Optional<CURL *> final_request(CURL *curl) {
   long response;
 
-  curl_easy_getinfo(this->curl, CURLINFO_RESPONSE_CODE, &response);
+  if (curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &response) != CURLE_OK) {
+    return Optional<CURL *>::none();
+  }
+
   if (response == 301 || response == 302) {
-    return false;
+    return Optional<CURL *>::none();
   }
 
-  curl_easy_getinfo(this->curl, CURLINFO_CONTENT_TYPE, &content_type);
-  if (content_type == NULL) {
-    return false;
-  }
-
-  this->response_content_type = filterUnprintables(content_type);
-  this->isHtml = determineIfHtml();
-  return true;
+  return Optional<CURL *>::some(curl);
 }
 
-bool EasyCurl::determineIfHtml() {
-  static string valid[] = {"text/html", "application/xhtml+xml"};
+static Optional<std::string> content_type(CURL *curl) {
+  const char *ct;
 
-  for (int i = 0; i < 2; i++) {
-    if (this->response_content_type.compare(0, valid[i].length(), valid[i]) ==
-        0) {
-      return true;
-    }
+  if (curl_easy_getinfo(curl, CURLINFO_CONTENT_TYPE, &ct) != CURLE_OK) {
+    return Optional<std::string>::none();
   }
-  return false;
+
+  return Optional<std::string>::some(std::string(ct));
+}
+
+bool EasyCurl::extractContentType() {
+  auto type =
+      final_request(this->curl).and_then(content_type).map(filterUnprintables);
+
+  this->response_content_type = type.value_or("");
+  this->isHtml = type.map(is_html_content_type).value_or(false);
+
+  return type.is_some();
 }
 
 EasyCurl::EasyCurl(string url) {
