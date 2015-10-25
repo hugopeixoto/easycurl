@@ -29,12 +29,41 @@ static std::string filterUnprintables(const std::string &str) {
   return filtered;
 }
 
-static Optional<std::string> html_body(const EasyCurl &response) {
-  if (response.isHtml) {
-    return Optional<std::string>::some(response.response_body);
+struct Dummy {};
+static Optional<Dummy> from_bool(bool ycao) {
+  if (ycao) {
+    return Optional<Dummy>::some(Dummy());
   } else {
-    return Optional<std::string>::none();
+    return Optional<Dummy>::none();
   }
+}
+
+static Optional<std::string> html_body(const EasyCurl &response) {
+  return from_bool(response.isHtml)
+      .and_(Optional<std::string>::some(response.response_body));
+}
+
+Result<CURL *, EasyCurl::Error> curl_result(CURL *curl, CURLcode code) {
+  typedef Result<CURL *, EasyCurl::Error> R;
+
+  return from_bool(code == CURLE_OK || code == CURLE_WRITE_ERROR)
+      .and_(Optional<CURL *>::some(curl))
+      .ok_or_else([code]() { return std::string(curl_easy_strerror(code)); });
+}
+
+template <typename T>
+static Result<T, EasyCurl::Error> easycurl_getinfo(CURL *curl, CURLINFO info) {
+  T result;
+
+  return curl_result(curl, curl_easy_getinfo(curl, info, &result))
+      .map([&result](CURL *) { return result; });
+}
+
+template <typename T> static std::string to_s(const T &value) {
+  std::ostringstream oss;
+  oss.precision(20);
+  oss << value;
+  return oss.str();
 }
 
 static bool is_html_content_type(const std::string &content_type) {
@@ -84,27 +113,19 @@ bool EasyCurl::instanceBodyWriter(char *data, size_t bytes) {
 }
 
 static Optional<CURL *> final_request(CURL *curl) {
-  long response;
+  auto not_redirect =
+      [](long code) { return from_bool(code != 301 && code != 302); };
 
-  if (curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &response) != CURLE_OK) {
-    return Optional<CURL *>::none();
-  }
-
-  if (response == 301 || response == 302) {
-    return Optional<CURL *>::none();
-  }
-
-  return Optional<CURL *>::some(curl);
+  return easycurl_getinfo<long>(curl, CURLINFO_RESPONSE_CODE)
+      .ok()
+      .and_then(not_redirect)
+      .and_(Optional<CURL *>::some(curl));
 }
 
 static Optional<std::string> content_type(CURL *curl) {
-  const char *ct;
-
-  if (curl_easy_getinfo(curl, CURLINFO_CONTENT_TYPE, &ct) != CURLE_OK) {
-    return Optional<std::string>::none();
-  }
-
-  return Optional<std::string>::some(std::string(ct));
+  return easycurl_getinfo<const char *>(curl, CURLINFO_CONTENT_TYPE)
+      .map(to_s<const char *>)
+      .ok();
 }
 
 bool EasyCurl::extractContentType() {
@@ -117,16 +138,20 @@ bool EasyCurl::extractContentType() {
   return type.is_some();
 }
 
+static Result<CURL *, EasyCurl::Error> curlRequest(CURL *curl) {
+  // Attempt to retrieve the remote page
+  return curl_result(curl, curl_easy_perform(curl));
+}
+
 EasyCurl::EasyCurl(string url) {
   this->request_url = url;
 
-  Optional<Error> error =
-      curlSetup().or_else([&]() { return this->curlRequest(); });
+  Result<CURL *, Error> result = curlSetup().and_then(curlRequest);
 
-  this->requestWentOk = error.is_none();
-  this->error_message = error.value_or("");
+  this->requestWentOk = result.is_ok();
+  this->error_message = result.err().value_or("");
 
-  if (error.is_none()) {
+  if (result.is_ok()) {
     extractMetadata();
 
     extractTitle();
@@ -147,29 +172,26 @@ void EasyCurl::extractImageURL() {
                           .value_or("");
 }
 
-static std::string default_title(const std::string &title) {
-  if (title == "") {
-    return "N/A";
-  } else {
-    return title;
-  }
+static auto validate_title(const std::string &title) {
+  return from_bool(title != "").and_(Optional<std::string>::some(title));
 }
 
 void EasyCurl::extractTitle() {
-  this->html_title = default_title(html_body(*this)
-                                       .and_then(html_parser::title)
-                                       .map(filterUnprintables)
-                                       .value_or(""));
+  this->html_title = html_body(*this)
+                         .and_then(html_parser::title)
+                         .map(filterUnprintables)
+                         .and_then(validate_title)
+                         .value_or("N/A");
 }
 
-Optional<EasyCurl::Error> EasyCurl::curlSetup() {
+Result<CURL *, EasyCurl::Error> EasyCurl::curlSetup() {
   // Write all expected data in here
   this->curl = curl_easy_init();
 
   this->bufferTotal = 0;
 
   if (!curl)
-    return Optional<EasyCurl::Error>::some("initialization error");
+    return Result<CURL *, EasyCurl::Error>::from_error("initialization error");
 
   curl_easy_setopt(this->curl, CURLOPT_URL, this->request_url.c_str());
   curl_easy_setopt(this->curl, CURLOPT_USERAGENT, USERAGENT_STR);
@@ -188,44 +210,27 @@ Optional<EasyCurl::Error> EasyCurl::curlSetup() {
   curl_easy_setopt(this->curl, CURLOPT_HEADERDATA, (void *)this);
   curl_easy_setopt(this->curl, CURLOPT_HEADERFUNCTION, EasyCurl::headerWriter);
 
-  return Optional<EasyCurl::Error>::none();
-}
-
-Optional<EasyCurl::Error> EasyCurl::curlRequest() {
-  // Attempt to retrieve the remote page
-  this->curlCode = curl_easy_perform(this->curl);
-
-  if ((this->curlCode != CURLE_OK) && (this->curlCode != CURLE_WRITE_ERROR)) {
-    return Optional<EasyCurl::Error>::some(curl_easy_strerror(this->curlCode));
-  }
-
-  return Optional<EasyCurl::Error>::none();
-}
-
-template <typename T> static std::string to_s(const T &value) {
-  std::ostringstream oss;
-  oss.precision(20);
-  oss << value;
-  return oss.str();
+  return Result<CURL *, EasyCurl::Error>::from_result(this->curl);
 }
 
 bool EasyCurl::extractMetadata() {
-  char *effective_url;
-  double content_length;
-  long response_code;
-  long redirect_count;
+  this->request_url =
+      easycurl_getinfo<const char *>(curl, CURLINFO_EFFECTIVE_URL)
+          .map(to_s<const char *>)
+          .value_or("");
 
-  // Along with the request get some information
-  curl_easy_getinfo(this->curl, CURLINFO_EFFECTIVE_URL, &effective_url);
-  curl_easy_getinfo(this->curl, CURLINFO_CONTENT_LENGTH_DOWNLOAD,
-                    &content_length);
-  curl_easy_getinfo(this->curl, CURLINFO_RESPONSE_CODE, &response_code);
-  curl_easy_getinfo(this->curl, CURLINFO_REDIRECT_COUNT, &redirect_count);
+  this->response_content_length =
+      easycurl_getinfo<double>(curl, CURLINFO_CONTENT_LENGTH_DOWNLOAD)
+          .map(to_s<double>)
+          .value_or("");
 
-  this->request_url = effective_url;
-  this->response_content_length = to_s(content_length);
-  this->response_code = to_s(response_code);
-  this->redirect_count = to_s(redirect_count);
+  this->response_code = easycurl_getinfo<long>(curl, CURLINFO_RESPONSE_CODE)
+                            .map(to_s<long>)
+                            .value_or("");
+
+  this->redirect_count = easycurl_getinfo<long>(curl, CURLINFO_REDIRECT_COUNT)
+                             .map(to_s<long>)
+                             .value_or("");
 
   return true;
 }

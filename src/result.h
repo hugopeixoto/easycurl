@@ -7,7 +7,7 @@ template <typename T> struct Optional;
 template <typename T, typename E> class Result;
 
 template <typename T, typename E> class Result {
-  bool ok;
+  bool ok_;
   T value;
   E error;
 
@@ -15,7 +15,7 @@ public:
   typedef T ValueType;
   typedef E ErrorType;
 
-  bool is_ok() const { return ok; }
+  bool is_ok() const { return ok_; }
 
   Optional<E> err() const {
     if (is_ok()) {
@@ -27,7 +27,7 @@ public:
 
   static Result<T, E> from_error(const E &e) {
     Result<T, E> r;
-    r.ok = false;
+    r.ok_ = false;
     r.error = e;
 
     return r;
@@ -35,7 +35,7 @@ public:
 
   static Result<T, E> from_result(const T &v) {
     Result<T, E> r;
-    r.ok = true;
+    r.ok_ = true;
     r.value = v;
 
     return r;
@@ -58,6 +58,22 @@ public:
       return tr(value);
     } else {
       return Result<T2, E>::from_error(error);
+    }
+  }
+
+  T value_or(const T &fallback) {
+    if (is_ok()) {
+      return value;
+    } else {
+      return fallback;
+    }
+  }
+
+  Optional<T> ok() const {
+    if (is_ok()) {
+      return Optional<T>::some(value);
+    } else {
+      return Optional<T>::none();
     }
   }
 };
@@ -87,7 +103,7 @@ public:
   bool is_some() const { return ok; }
 
   template <typename F>
-  auto and_then(F tr) {
+  auto and_then(F tr) const {
     typedef typename decltype(tr(value))::ValueType T2;
 
     if (ok) {
@@ -95,6 +111,10 @@ public:
     } else {
       return Optional<T2>::none();
     }
+  }
+
+  template <typename T2> auto and_(const T2& v) const {
+    return and_then([&v](const T&){ return v; });
   }
 
   template <typename F>
@@ -124,11 +144,30 @@ public:
     }
   }
 
+  template <typename F>
+  auto value_or_else(F tr) {
+    if (ok) {
+      return value;
+    } else {
+      return tr();
+    }
+  }
+
   template <typename E> Result<T, E> ok_or(const E &error) {
     if (ok) {
       return Result<T, E>::from_result(value);
     } else {
       return Result<T, E>::from_error(error);
+    }
+  }
+
+  template <typename F> auto ok_or_else(const F &f) {
+    typedef decltype(f()) E;
+
+    if (ok) {
+      return Result<T, E>::from_result(value);
+    } else {
+      return Result<T, E>::from_error(f());
     }
   }
 };

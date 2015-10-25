@@ -12,9 +12,10 @@
 #define DOWNLOAD_SIZE (5*1024)
 
 class EasyCurl {
-  private:
+  public:
     typedef std::string Error;
 
+  private:
     CURL* curl;
     CURLcode curlCode;
 
@@ -28,8 +29,7 @@ class EasyCurl {
     static int headerWriter(char *data, size_t size, size_t nmemb, EasyCurl* instance);
     bool instanceHeaderWriter(char*data, size_t bytes);
 
-    Optional<Error> curlSetup();
-    Optional<Error> curlRequest();
+    Result<CURL*, EasyCurl::Error> curlSetup();
 
     bool extractContentType();
     void extractTitle();
