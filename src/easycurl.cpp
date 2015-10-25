@@ -7,71 +7,68 @@
 
 #include "easycurl.h"
 #include "stripper.h"
+#include "html_parser.h"
+#include "result.h"
 
-#include <boost/regex.hpp>
 #include <sstream>
+#include <cstring>
 #include <algorithm>
-#include <locale>
 
 using namespace std;
 
-extern "C" size_t decode_html_entities_utf8(char *dest, const char *src);
-
-
-bool EasyCurl::is_not_printable(char c) {
-  //locale l(ISPRINT_LOCALE);
-  //return !isprint(c, l);
+static bool is_not_printable(char c) {
+  // locale l(ISPRINT_LOCALE);
+  // return !isprint(c, l);
   return !((unsigned int)c > 31);
 }
 
-string EasyCurl::filterUnprintables(string str)
-{
-  str.erase(remove_if(str.begin(), str.end(), EasyCurl::is_not_printable), str.end());
-  return str;
+static std::string filterUnprintables(const std::string &str) {
+  std::string filtered = str;
+  filtered.erase(remove_if(filtered.begin(), filtered.end(), is_not_printable),
+                 filtered.end());
+  return filtered;
 }
 
-string EasyCurl::translateHtmlEntities(string str) {
-  char buff[str.length()+1];
-  decode_html_entities_utf8(buff, str.c_str());
-  return string(buff);
+static Optional<std::string> html_body(const EasyCurl &response) {
+  if (response.isHtml) {
+    return Optional<std::string>::some(response.response_body);
+  } else {
+    return Optional<std::string>::none();
+  }
 }
 
-int EasyCurl::headerWriter(char *data, size_t size, size_t nmemb, EasyCurl* instance) {
-  return instance->instanceHeaderWriter(data, size, nmemb);
+int EasyCurl::headerWriter(char *data, size_t size, size_t nmemb,
+                           EasyCurl *instance) {
+  return instance->instanceHeaderWriter(data, size * nmemb) ? size * nmemb : 0;
 }
 
-int EasyCurl::instanceHeaderWriter(char *data, size_t size, size_t nmemb) {
-  if (!memcmp(data, "\r\n", std::min(size*nmemb, (size_t)2U))) {
+bool EasyCurl::instanceHeaderWriter(char *data, size_t bytes) {
+  if (!memcmp(data, "\r\n", std::min(bytes, (size_t)2U))) {
     if (extractContentType() && !isHtml) {
       // early abort if not html
-      return 0;
+      return false;
     }
   }
 
-  //Stop if max size exceeded
-  this->bufferTotal += size * nmemb;
-  if (this->bufferTotal > DOWNLOAD_SIZE) {
-    return 0;
-  }
+  this->bufferTotal += bytes;
 
-  return size * nmemb;
+  // Continue if max size is not exceeded
+  return (this->bufferTotal <= DOWNLOAD_SIZE);
 }
 
-int EasyCurl::bodyWriter(char *data, size_t size, size_t nmemb, EasyCurl* instance) {
-  return instance->instanceBodyWriter(data, size, nmemb);
+int EasyCurl::bodyWriter(char *data, size_t size, size_t nmemb,
+                         EasyCurl *instance) {
+  return instance->instanceBodyWriter(data, size * nmemb) ? size * nmemb : 0;
 }
 
-int EasyCurl::instanceBodyWriter(char *data, size_t size, size_t nmemb) {
+bool EasyCurl::instanceBodyWriter(char *data, size_t bytes) {
   // Append the data to the buffer
-  this->response_body.append(data, size * nmemb);
+  this->response_body.append(data, bytes);
 
-  //Stop if max size exceeded
-  this->bufferTotal += size * nmemb;
-  if (this->bufferTotal > DOWNLOAD_SIZE) {
-    return 0;
-  }
+  this->bufferTotal += bytes;
 
-  return size * nmemb;
+  // Continue if max size is not exceeded
+  return (this->bufferTotal <= DOWNLOAD_SIZE);
 }
 
 bool EasyCurl::extractContentType() {
@@ -97,51 +94,29 @@ bool EasyCurl::determineIfHtml() {
   static string valid[] = {"text/html", "application/xhtml+xml"};
 
   for (int i = 0; i < 2; i++) {
-    if (this->response_content_type.compare(0, valid[i].length(), valid[i]) == 0) {
+    if (this->response_content_type.compare(0, valid[i].length(), valid[i]) ==
+        0) {
       return true;
     }
   }
   return false;
 }
 
-string EasyCurl::parseFor(string buffer, string expr, int match_no) {
-  boost::regex re;
-  boost::cmatch matches;
-  re.assign(expr, boost::regex_constants::icase);
-
-  // Throws exceptions
-  if (boost::regex_match(buffer.c_str(), matches, re, boost::match_not_eol)) {
-    return filterUnprintables(matches[match_no]);
-  } else {
-    return "";
-  }
-}
-
 EasyCurl::EasyCurl(string url) {
-  this->requestWentOk = true;
   this->request_url = url;
-  int result;
 
-  result = this->curlSetup();
-  if (result < 0) {
-    this->requestWentOk = false;
-    return;
+  Optional<Error> error =
+      curlSetup().or_else([&]() { return this->curlRequest(); });
+
+  this->requestWentOk = error.is_none();
+  this->error_message = error.value_or("");
+
+  if (error.is_none()) {
+    extractMetadata();
+
+    extractTitle();
+    extractImageURL();
   }
-
-  result = this->curlRequest();
-  if (result < 0) {
-    this->requestWentOk = false;
-    this->error_message = curl_easy_strerror(this->curlCode);
-    return;
-  }
-
-  extractMetadata();
-
-  // Obtain HTML Title + translate HTML Entities
-  extractTitle();
-
-  extractPrntscr();
-
 }
 
 EasyCurl::~EasyCurl() {
@@ -150,55 +125,41 @@ EasyCurl::~EasyCurl() {
   }
 }
 
-bool EasyCurl::extractPrntscr() {
-  if (this->isHtml && boost::regex_match(this->request_url, boost::regex("^http:\\/\\/prntscr.com\\/[0-9a-zA-Z]{6}$"))) {
-    try {
-      this->prntscr_url = stripWhitespace(
-          translateHtmlEntities(
-            EasyCurl::parseFor(this->response_body, ".*<meta name=\"twitter:image:src\" content=\"([^\"]*)\".*", 1)));
-    } catch(...) {
-      return false;
-    }
-  }
-
-  return true;
+void EasyCurl::extractImageURL() {
+  this->prntscr_url = html_body(*this)
+                          .and_then(html_parser::image_url)
+                          .map(filterUnprintables)
+                          .value_or("");
 }
 
-bool EasyCurl::extractTitle() {
-  if (this->isHtml) {
-    try {
-      this->html_title = EasyCurl::parseFor(this->response_body,
-          ".*(<title>|<title .+>)(.*)</title>.*", 2);
-    } catch(...) {
-      this->requestWentOk = false;
-    }
-  }
-
-  if (this->html_title == "") {
-    this->html_title = "N/A";
+static std::string default_title(const std::string &title) {
+  if (title == "") {
+    return "N/A";
   } else {
-    //strip leading and trailing whitespace
-    if (this->requestWentOk) {
-      this->html_title = stripWhitespace(EasyCurl::translateHtmlEntities(this->html_title));
-    }
+    return title;
   }
-
-  return this->requestWentOk;
 }
 
-int EasyCurl::curlSetup() {
+void EasyCurl::extractTitle() {
+  this->html_title = default_title(html_body(*this)
+                                       .and_then(html_parser::title)
+                                       .map(filterUnprintables)
+                                       .value_or(""));
+}
+
+Optional<EasyCurl::Error> EasyCurl::curlSetup() {
   // Write all expected data in here
   this->curl = curl_easy_init();
 
   this->bufferTotal = 0;
 
   if (!curl)
-    return -1;
+    return Optional<EasyCurl::Error>::some("initialization error");
 
   curl_easy_setopt(this->curl, CURLOPT_URL, this->request_url.c_str());
   curl_easy_setopt(this->curl, CURLOPT_USERAGENT, USERAGENT_STR);
 
-  //I'm not sure how CURL_TIMEOUT works
+  // I'm not sure how CURL_TIMEOUT works
   curl_easy_setopt(this->curl, CURLOPT_TIMEOUT, 10);
   curl_easy_setopt(this->curl, CURLOPT_MAXREDIRS, 10);
   curl_easy_setopt(this->curl, CURLOPT_HEADER, 0);
@@ -206,54 +167,50 @@ int EasyCurl::curlSetup() {
   curl_easy_setopt(this->curl, CURLOPT_ENCODING, "identity");
   curl_easy_setopt(this->curl, CURLOPT_FOLLOWLOCATION, 1);
 
-  curl_easy_setopt(this->curl, CURLOPT_WRITEDATA, (void*)this);
+  curl_easy_setopt(this->curl, CURLOPT_WRITEDATA, (void *)this);
   curl_easy_setopt(this->curl, CURLOPT_WRITEFUNCTION, EasyCurl::bodyWriter);
 
-  curl_easy_setopt(this->curl, CURLOPT_HEADERDATA, (void*)this);
+  curl_easy_setopt(this->curl, CURLOPT_HEADERDATA, (void *)this);
   curl_easy_setopt(this->curl, CURLOPT_HEADERFUNCTION, EasyCurl::headerWriter);
 
-  return 0;
+  return Optional<EasyCurl::Error>::none();
 }
 
-int EasyCurl::curlRequest() {
+Optional<EasyCurl::Error> EasyCurl::curlRequest() {
   // Attempt to retrieve the remote page
   this->curlCode = curl_easy_perform(this->curl);
 
   if ((this->curlCode != CURLE_OK) && (this->curlCode != CURLE_WRITE_ERROR)) {
-    return -1;
+    return Optional<EasyCurl::Error>::some(curl_easy_strerror(this->curlCode));
   }
 
-  return 0;
+  return Optional<EasyCurl::Error>::none();
+}
+
+template <typename T> static std::string to_s(const T &value) {
+  std::ostringstream oss;
+  oss.precision(20);
+  oss << value;
+  return oss.str();
 }
 
 bool EasyCurl::extractMetadata() {
-  char* effective_url;
+  char *effective_url;
   double content_length;
   long response_code;
   long redirect_count;
 
   // Along with the request get some information
   curl_easy_getinfo(this->curl, CURLINFO_EFFECTIVE_URL, &effective_url);
-  curl_easy_getinfo(this->curl, CURLINFO_CONTENT_LENGTH_DOWNLOAD, &content_length);
+  curl_easy_getinfo(this->curl, CURLINFO_CONTENT_LENGTH_DOWNLOAD,
+                    &content_length);
   curl_easy_getinfo(this->curl, CURLINFO_RESPONSE_CODE, &response_code);
   curl_easy_getinfo(this->curl, CURLINFO_REDIRECT_COUNT, &redirect_count);
 
-  ostringstream oss;
-  oss.precision(20);
-
   this->request_url = effective_url;
-
-  oss << content_length;
-  this->response_content_length = oss.str();
-  oss.str("");
-
-  oss << response_code;
-  this->response_code = oss.str();
-  oss.str("");
-
-  oss << redirect_count;
-  this->redirect_count = oss.str();
-  oss.str("");
+  this->response_content_length = to_s(content_length);
+  this->response_code = to_s(response_code);
+  this->redirect_count = to_s(redirect_count);
 
   return true;
 }

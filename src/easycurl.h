@@ -3,6 +3,7 @@
 
 #include <iostream>
 #include <string>
+#include "result.h"
 
 #include <curl/curl.h>
 
@@ -11,31 +12,28 @@
 #define DOWNLOAD_SIZE (5*1024)
 
 class EasyCurl {
-
   private:
+    typedef std::string Error;
+
     CURL* curl;
     CURLcode curlCode;
 
     int bufferTotal;
 
-    static bool is_not_printable(char c);
-    static std::string filterUnprintables(std::string str);
-    static std::string translateHtmlEntities(std::string str);
-    static std::string parseFor(std::string buffer, std::string expr, int match_no);
     bool determineIfHtml();
 
     static int bodyWriter(char *data, size_t size, size_t nmemb, EasyCurl* instance);
-    int instanceBodyWriter(char*data, size_t size, size_t nmemb);
+    bool instanceBodyWriter(char*data, size_t bytes);
 
     static int headerWriter(char *data, size_t size, size_t nmemb, EasyCurl* instance);
-    int instanceHeaderWriter(char*data, size_t size, size_t nmemb);
+    bool instanceHeaderWriter(char*data, size_t bytes);
 
-    int curlSetup();
-    int curlRequest();
+    Optional<Error> curlSetup();
+    Optional<Error> curlRequest();
 
     bool extractContentType();
-    bool extractTitle();
-    bool extractPrntscr();
+    void extractTitle();
+    void extractImageURL();
     bool extractMetadata();
 
     void fail();

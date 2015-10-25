@@ -1,4 +1,3 @@
-// Copyright 2013 Hugo Peixoto (hugopeixoto.net)
 #include "stripper.h"
 
 std::string stripWhitespace (const std::string& str)

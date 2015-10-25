@@ -7,10 +7,13 @@ AC_PROG_CXX
 AC_PROG_CC
 AC_PROG_LIBTOOL
 
+
 m4_include([m4/boost.m4])
 
 BOOST_REQUIRE(1.40)
 BOOST_REGEX()
+
+CXXFLAGS+=" -std=c++14"
 
 LIBCURL_CHECK_CONFIG([yes], [], [], [
     AC_MSG_ERROR([easycurl requires libcurl (http://curl.haxx.se/).])

@@ -7,7 +7,8 @@ libentities_la_CFLAGS=-std=c99
 lib_LTLIBRARIES=libeasycurl.la
 
 libeasycurl_la_SOURCES=easycurl.cpp \
-                       stripper.cpp
+                       stripper.cpp \
+                       html_parser.cpp
 
 libeasycurl_la_CPPFLAGS=$(BOOST_CPPFLAGS) \
 						@LIBCURL_CPPFLAGS@
